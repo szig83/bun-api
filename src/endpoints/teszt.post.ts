@@ -1,6 +1,6 @@
 export default (params: Record<string, any>) => {
 	return {
-		message: 'GET teszt',
+		message: 'POST teszt',
 		params: params
 	};
 };
