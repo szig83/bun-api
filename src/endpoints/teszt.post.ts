@@ -1,6 +1,12 @@
-export default (params: Record<string, any>) => {
+import type { ApiResponse } from '../lib/api.class';
+
+export default (params: Record<string, any>): ApiResponse => {
 	return {
-		message: 'POST teszt',
-		params: params
+		success: true,
+		statusCode: 200,
+		result: {
+			message: 'POST teszt',
+			params: params
+		}
 	};
 };

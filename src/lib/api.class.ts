@@ -1,3 +1,8 @@
+import { parseAsync, ValiError, type BaseSchema, type BaseSchemaAsync } from 'valibot';
+import { AppError, ValidationError, NotFoundError } from './errors.class.ts';
+
+import { Logger } from './logger.class.ts';
+
 export interface ApiContext {
 	params: Record<string, any>;
 	query: Record<string, any>;
@@ -5,6 +10,13 @@ export interface ApiContext {
 	request: Request;
 	headers: Record<string, string | string[]>;
 	set: any;
+}
+
+export interface ApiResponse<T = any> {
+	success: boolean;
+	statusCode: number;
+	result?: T;
+	errors?: any;
 }
 
 export default class Api {
@@ -15,11 +27,10 @@ export default class Api {
 	public headers: Record<string, string>;
 	public urlParams: Record<string, string>;
 	public responseCode: number = 200;
-	public errors: Array<{ statusCode: number; message: string }> = [];
-	public result: Record<string, any> = {};
+	public errors: Array<{ statusCode: number; message: string; details?: any }> = [];
+	public result: any = {};
 
 	constructor(context: ApiContext) {
-		console.log(context);
 		// HTTP metódus
 		this.method = context.request.method.toUpperCase();
 
@@ -59,41 +70,79 @@ export default class Api {
 		return this.headers[key.toLowerCase()] ?? defaultValue;
 	}
 
-	private addError(message: string, statusCode?: number): void {
-		this.responseCode = statusCode ?? this.responseCode;
-		this.errors.push({ statusCode: this.responseCode, message });
+	private addError(message: string, statusCode: number = 500, details?: any): void {
+		this.responseCode = statusCode;
+		this.errors.push({ statusCode, message, details });
+		Logger.error(message, details);
 	}
 
-	private getErrors(): Array<{ statusCode: number; message: string }> {
+	private getErrors(): Array<{ statusCode: number; message: string; details?: any }> {
 		return this.errors;
 	}
 
-	private getResult(): Record<string, any> {
+	private getResult(): any {
 		return this.result;
 	}
 
 	async loadEndpoint(): Promise<Api> {
 		if (this.checkRequest()) {
-			//console.log(this.urlParams['*']);
 			const id = this.urlParams['*'];
 
 			try {
 				const endpointPath = `../endpoints/${id}.${this.method?.toLowerCase()}.ts`;
-				console.log(endpointPath);
+				console.log(`Loading endpoint: ${endpointPath}`);
+
 				const idModule = await import(endpointPath);
 
 				if (idModule.default) {
-					// Támogatás async endpointokhoz is
-					this.result = await idModule.default(this.params);
+					// Validation Logic
+					if (idModule.schema) {
+						try {
+							// Validate params against the schema using Valibot
+							const schema = idModule.schema as
+								| BaseSchema<any, any, any>
+								| BaseSchemaAsync<any, any, any>;
+							const validatedParams = await parseAsync(schema, this.params);
+							// Update params with validated (and potentially transformed) data
+							this.params = validatedParams;
+						} catch (validationError) {
+							if (validationError instanceof ValiError) {
+								// Format Valibot errors
+								const details = validationError.issues.map((issue) => ({
+									path: issue.path?.map((p: any) => p.key).join('.') || 'unknown',
+									message: issue.message
+								}));
+								throw new ValidationError(JSON.stringify(details));
+							}
+							throw validationError;
+						}
+					}
+
+					// Execute endpoint
+					const response: ApiResponse = await idModule.default(this.params);
+
+					this.responseCode = response.statusCode;
+					if (response.success) {
+						this.result = response.result;
+					} else {
+						this.errors = response.errors || [];
+					}
 				} else {
-					this.addError('Endpoint has no default export', 500);
+					throw new AppError('Endpoint has no default export', 500);
 				}
 			} catch (error: any) {
-				// Részletesebb hibakezelés
-				if (error?.code === 'MODULE_NOT_FOUND' || error?.message?.includes('Cannot find module')) {
-					this.addError('Endpoint not found', 404);
+				// Handle specific errors
+				if (error instanceof AppError) {
+					this.addError(error.message, error.statusCode);
+				} else if (error instanceof ValiError) {
+					// Should be caught above, but just in case
+					this.addError('Validation Error', 400, error.issues);
+				} else if (
+					error?.code === 'MODULE_NOT_FOUND' ||
+					error?.message?.includes('Cannot find module')
+				) {
+					this.addError(`Endpoint not found: ${id}, method: ${this.method}`, 404);
 				} else {
-					console.error('Endpoint error:', error);
 					this.addError('Internal server error', 500);
 				}
 			}
@@ -112,11 +161,21 @@ export default class Api {
 		return true;
 	}
 
-	getResponse(): Record<string, any> {
+	getResponse(): ApiResponse {
+		// If there are errors, return the first one's status code (or 500)
+		// and the list of errors.
+		if (this.errors.length > 0) {
+			return {
+				statusCode: this.responseCode, // This is usually the last error's code
+				success: false,
+				errors: this.errors
+			};
+		}
+
 		return {
 			statusCode: this.responseCode,
-			result: this.getResult(),
-			errors: this.getErrors()
+			success: true,
+			result: this.getResult()
 		};
 	}
 }
